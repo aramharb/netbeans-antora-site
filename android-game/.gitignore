@@ -1,6 +1,11 @@
-.godot/
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
 *.apk
 *.aab
 *.keystore
-export_credentials.cfg
-android/build/

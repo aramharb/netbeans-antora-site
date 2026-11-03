@@ -1,23 +1,21 @@
-# Gem Pop – Android match-3 (Godot 4)
+# Gem Pop – Android Studio project (Kotlin)
 
-Polished portrait match-3 puzzle game. All art is drawn in code (no image
-assets), so it stays sharp on every screen density.
+Match-3 puzzle where every tile has a **color** and a **number**.
 
-## Features
-- Swipe or tap-tap to swap gems; invalid swaps bounce back
-- Cascades with combo multiplier, particle bursts, bouncy gravity animation
-- Distinct shape per colour (colour-blind friendly)
-- Haptic feedback, saved best score, auto-reshuffle when no moves remain
-- MSAA 2D, Mobile renderer, ETC2/ASTC compression, 720x1280 scaled layout
+| Match (3+ in a row/column) | Result |
+|---|---|
+| Same **color** | normal match |
+| Same **number** | normal match |
+| Same **color AND number** | **PERFECT**: clears the whole row + column, **+2 moves**, +300 bonus |
 
-## Run
-1. Install Godot 4.3+ and open this folder (`project.godot`).
-2. Press F5 (use the 360x640 window; mouse emulates touch).
+Swipe a tile, or tap two neighbouring tiles, to swap. Cascades raise a combo
+multiplier. 25 moves per game; best score is saved.
 
-## Build for Android
-1. Editor → Manage Export Templates → install; Editor Settings → Export → Android: set SDK and JDK paths.
-2. Project → Export → Android → set your keystore, change `package/unique_name`.
-3. Export APK/AAB (or enable "Run on remote device" over USB).
+## Open & run in Android Studio
+1. **File → Open…** and choose this `android-game` folder (Android Studio Koala or newer; JDK 17 is bundled).
+2. Let Gradle sync finish (it downloads Gradle 8.7 + Android Gradle Plugin 8.5.2; SDK 34 will be offered if missing).
+3. Pick an emulator or a USB device and press **Run ▶**.
 
-## Ideas next
-Sound effects, special gems (4/5 matches), levels with goals, safe-area insets.
+CLI: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`.
+
+No third-party dependencies; all graphics are drawn on a `Canvas` in `GameView.kt`.
