@@ -8,6 +8,16 @@ Match-3 puzzle where every tile has a **color** and a **number**.
 | Same **number** | normal match |
 | Same **color AND number** | **PERFECT**: clears the whole row + column, **+2 moves**, +300 bonus |
 
+### Special gems
+| Create by | Gem | Effect |
+|---|---|---|
+| Matching exactly **4** | **Bomb** (white spikes + spark) | when matched, explodes a 3x3 area (bombs chain) |
+| Matching **5+** | **Rainbow** (spinning colors) | swap it with any tile to clear every tile of that color; two rainbows clear the board |
+
+### Sound
+Effects (swap, invalid, matches that rise in pitch with combos, perfect, boom, rainbow, game over) are
+synthesized in `SoundFx.kt`, so there are no audio files. Toggle with the SOUND button (saved).
+
 Swipe a tile, or tap two neighbouring tiles, to swap. Cascades raise a combo
 multiplier. 25 moves per game; best score is saved.
 

@@ -45,15 +45,18 @@ class GameView(context: Context) : View(context) {
     private class Tile(var color: Int, var num: Int, var x: Float, var y: Float) {
         var scale = 1f
         var alpha = 1f
+        var special = 0 // 0 none, 1 bomb (clears 3x3), 2 rainbow (swap: clears a color)
     }
     private class Particle(var x: Float, var y: Float, var vx: Float, var vy: Float, var life: Float, val color: Int)
-    private class MatchResult(val cleared: MutableSet<Pt>, val totals: MutableSet<Pt>)
+    private class MatchResult(val cleared: MutableSet<Pt>, val totals: MutableSet<Pt>, val spawns: MutableMap<Pt, Int>)
 
     companion object {
         const val N = 8
         const val COLOR_COUNT = 5
         const val NUM_COUNT = 5
         const val START_MOVES = 25
+        const val BOMB = 1
+        const val RAINBOW = 2
         private val PALETTE = intArrayOf(
             Color.parseColor("#FF4D6D"), // red
             Color.parseColor("#FFD23F"), // yellow
@@ -80,6 +83,12 @@ class GameView(context: Context) : View(context) {
     private var messageAlpha = 0f
     private var messageScale = 1f
     private var flash = 0f
+    private val sfx = SoundFx()
+    private val soundRect = RectF()
+    private val rainbowShader = android.graphics.SweepGradient(
+        0f, 0f, PALETTE + PALETTE[0], null
+    )
+    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
     private val prefs = context.getSharedPreferences("gempop", Context.MODE_PRIVATE)
 
     // ---- layout ----
@@ -89,6 +98,7 @@ class GameView(context: Context) : View(context) {
     private var boardTop = 0f
     private var bg: LinearGradient? = null
     private val restartRect = RectF()
+    private var specialCount = 0
 
     // ---- paints / shapes ----
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -97,11 +107,24 @@ class GameView(context: Context) : View(context) {
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
     private val shapes: Array<Path> = Array(COLOR_COUNT) { shapePath(it) }
+    private val starPath = Path().apply {
+        for (i in 0 until 10) {
+            val ang = -Math.PI / 2 + 2 * Math.PI * i / 10
+            val rr = if (i % 2 == 0) 1f else 0.45f
+            val px = (cos(ang) * rr).toFloat()
+            val py = (sin(ang) * rr).toFloat()
+            if (i == 0) moveTo(px, py) else lineTo(px, py)
+        }
+        close()
+    }
 
     init {
         best = prefs.getInt("best", 0)
+        sfx.enabled = prefs.getBoolean("sound", true)
         newGame()
     }
+
+    fun release() = sfx.release()
 
     // =====================================================================
     // Game logic
@@ -147,6 +170,7 @@ class GameView(context: Context) : View(context) {
     private fun findMatches(): MatchResult {
         val cleared = HashSet<Pt>()
         val totals = LinkedHashSet<Pt>()
+        val spawns = HashMap<Pt, Int>()
         for (dir in 0..1) {
             for (line in 0 until N) {
                 fun at(i: Int): Tile = if (dir == 0) grid[i][line]!! else grid[line][i]!!
@@ -155,7 +179,7 @@ class GameView(context: Context) : View(context) {
                     fun key(t: Tile) = if (mode == 0) t.color else t.num
                     var start = 0
                     for (i in 1..N) {
-                        val same = i < N && key(at(i)) == key(at(i - 1))
+                        val same = i < N && at(i).special != RAINBOW && at(i - 1).special != RAINBOW && key(at(i)) == key(at(i - 1))
                         if (same) continue
                         if (i - start >= 3) {
                             var total = true
@@ -164,13 +188,18 @@ class GameView(context: Context) : View(context) {
                             }
                             for (j in start until i) cleared.add(pt(j))
                             if (total) totals.add(pt((start + i - 1) / 2))
+                            if (i - start >= 4) {
+                                val kind = if (i - start >= 5) RAINBOW else BOMB
+                                val at = pt((start + i - 1) / 2)
+                                if ((spawns[at] ?: 0) < kind) spawns[at] = kind
+                            }
                         }
                         start = i
                     }
                 }
             }
         }
-        return MatchResult(cleared, totals)
+        return MatchResult(cleared, totals, spawns)
     }
 
     private fun hasMoves(): Boolean {
@@ -182,7 +211,7 @@ class GameView(context: Context) : View(context) {
                 val a = grid[x][y]
                 grid[x][y] = grid[ox][oy]
                 grid[ox][oy] = a
-                val ok = findMatches().cleared.isNotEmpty()
+                val ok = a!!.special == RAINBOW || grid[x][y]!!.special == RAINBOW || findMatches().cleared.isNotEmpty()
                 grid[ox][oy] = grid[x][y]
                 grid[x][y] = a
                 if (ok) return true
@@ -198,6 +227,7 @@ class GameView(context: Context) : View(context) {
                 val t = grid[x][y]!!
                 t.color = Random.nextInt(COLOR_COUNT)
                 t.num = Random.nextInt(1, NUM_COUNT + 1)
+                t.special = 0
             }
             guard++
         } while ((findMatches().cleared.isNotEmpty() || !hasMoves()) && guard < 200)
@@ -205,8 +235,15 @@ class GameView(context: Context) : View(context) {
 
     private fun trySwap(a: Pt, b: Pt) {
         busy = true
+        sfx.play("swap")
         swap(a, b) {
-            if (findMatches().cleared.isEmpty()) {
+            val ta = grid[a.x][a.y]!!
+            val tb = grid[b.x][b.y]!!
+            if (ta.special == RAINBOW || tb.special == RAINBOW) {
+                moves--
+                activateRainbow(a, b)
+            } else if (findMatches().cleared.isEmpty()) {
+                sfx.play("bad")
                 swap(a, b) { busy = false } // invalid move: swap back
             } else {
                 moves--
@@ -239,22 +276,84 @@ class GameView(context: Context) : View(context) {
                 toClear.add(Pt(t.x, i))
             }
         }
-        score += toClear.size * 10 * combo + m.totals.size * 300 * combo
-        if (m.totals.isNotEmpty()) {
-            val bonus = 2 * m.totals.size
-            moves += bonus
-            showMessage("PERFECT MATCH!\n+$bonus moves")
-            flash = 1f
-            animate(500, DecelerateInterpolator(), { flash = 1f - it }) {}
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        } else {
-            if (combo >= 2) showMessage("COMBO x$combo")
-            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        clearTiles(toClear, m.spawns, m.totals.size, combo, null)
+    }
+
+    /** Swapping a rainbow gem clears every tile of the neighbour's color (or the whole board). */
+    private fun activateRainbow(a: Pt, b: Pt) {
+        val ta = grid[a.x][a.y]!!
+        val tb = grid[b.x][b.y]!!
+        val toClear = HashSet<Pt>()
+        toClear.add(a)
+        toClear.add(b)
+        val both = ta.special == RAINBOW && tb.special == RAINBOW
+        val target = if (ta.special == RAINBOW) tb.color else ta.color
+        for (x in 0 until N) for (y in 0 until N) {
+            if (both || grid[x][y]!!.color == target) toClear.add(Pt(x, y))
+        }
+        clearTiles(toClear, emptyMap(), 0, 1, if (both) "RAINBOW BLAST!" else "RAINBOW!")
+    }
+
+    private fun clearTiles(toClear: MutableSet<Pt>, spawns: Map<Pt, Int>, perfects: Int, combo: Int, label: String?) {
+        // bombs in the cleared set explode a 3x3 area (chains)
+        var bombs = 0
+        val exploded = HashSet<Pt>()
+        var changed = true
+        while (changed) {
+            changed = false
+            for (p in toClear.toList()) {
+                if (p in exploded || grid[p.x][p.y]!!.special != BOMB) continue
+                exploded.add(p)
+                bombs++
+                changed = true
+                for (dx in -1..1) for (dy in -1..1) {
+                    val q = Pt(p.x + dx, p.y + dy)
+                    if (q.x in 0 until N && q.y in 0 until N) toClear.add(q)
+                }
+            }
+        }
+        // 4-match -> bomb, 5-match -> rainbow: that tile survives and is upgraded
+        val survivors = spawns.filterKeys { it !in exploded }
+        for (p in survivors.keys) toClear.remove(p)
+
+        score += toClear.size * 10 * combo + perfects * 300 * combo + bombs * 50 * combo
+        when {
+            perfects > 0 -> {
+                moves += 2 * perfects
+                showMessage("PERFECT MATCH!\n+${2 * perfects} moves")
+                flash = 1f
+                animate(500, DecelerateInterpolator(), { flash = 1f - it }) {}
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                sfx.play("perfect")
+            }
+            label != null -> {
+                showMessage(label)
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                sfx.play("rainbow")
+            }
+            bombs > 0 -> {
+                showMessage("BOOM!")
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                sfx.play("boom")
+            }
+            else -> {
+                if (combo >= 2) showMessage("COMBO x$combo")
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                sfx.play("match${minOf(combo - 1, 5)}")
+            }
         }
         val tiles = toClear.map { grid[it.x][it.y]!! }
-        for (t in tiles) burst(t, if (m.totals.isNotEmpty()) 16 else 9)
+        for (t in tiles) burst(t, if (perfects > 0 || bombs > 0 || label != null) 16 else 9)
         animate(220, AccelerateInterpolator(), { f -> tiles.forEach { it.scale = 1f - f; it.alpha = 1f - f } }) {
             for (p in toClear) grid[p.x][p.y] = null
+            if (survivors.isNotEmpty()) {
+                for ((p, kind) in survivors) grid[p.x][p.y]?.let { t ->
+                    t.special = kind
+                    t.scale = 0.5f
+                    scaleTo(t, 1f)
+                }
+                sfx.play("spawn")
+            }
             collapse { resolve(combo + 1) }
         }
     }
@@ -285,6 +384,7 @@ class GameView(context: Context) : View(context) {
     private fun finishTurn() {
         if (moves <= 0) {
             gameOver = true
+            sfx.play("over")
             if (score > best) {
                 best = score
                 prefs.edit().putInt("best", best).apply()
@@ -295,6 +395,7 @@ class GameView(context: Context) : View(context) {
         }
         if (!hasMoves()) {
             showMessage("No moves left\nShuffling...")
+            sfx.play("shuffle")
             reshuffleInstant()
             val all = ArrayList<Tile>()
             for (x in 0 until N) for (y in 0 until N) all.add(grid[x][y]!!)
@@ -380,6 +481,12 @@ class GameView(context: Context) : View(context) {
     override fun onTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (soundRect.contains(e.x, e.y)) {
+                    sfx.enabled = !sfx.enabled
+                    prefs.edit().putBoolean("sound", sfx.enabled).apply()
+                    invalidate()
+                    return true
+                }
                 if (gameOver) {
                     if (restartRect.contains(e.x, e.y)) newGame()
                     return true
@@ -423,7 +530,7 @@ class GameView(context: Context) : View(context) {
         unit = w / 720f
         val margin = 32f * unit
         val top = 400f * unit
-        val bottomReserve = 190f * unit
+        val bottomReserve = 230f * unit
         cell = min((w - 2 * margin) / N, (h - top - bottomReserve) / N)
         boardLeft = (w - cell * N) / 2f
         boardTop = top
@@ -450,8 +557,10 @@ class GameView(context: Context) : View(context) {
         // tiles (clipped so falling tiles don't draw over the HUD)
         c.save()
         c.clipRect(panel)
+        specialCount = 0
         for (x in 0 until N) for (y in 0 until N) grid[x][y]?.let { drawTile(c, it) }
         c.restore()
+        if (specialCount > 0) postInvalidateOnAnimation()
 
         drawParticles(c)
 
@@ -467,6 +576,13 @@ class GameView(context: Context) : View(context) {
         text.color = Color.parseColor("#FFD23F")
         text.textSize = 60 * unit
         c.drawText("GEM POP", width / 2f, 90 * unit, text)
+
+        soundRect.set(width - 190 * unit, 30 * unit, width - 24 * unit, 100 * unit)
+        fill.color = Color.argb(60, 255, 255, 255)
+        c.drawRoundRect(soundRect, 20 * unit, 20 * unit, fill)
+        text.color = Color.WHITE
+        text.textSize = 28 * unit
+        c.drawText(if (sfx.enabled) "SOUND ON" else "SOUND OFF", soundRect.centerX(), soundRect.centerY() + 10 * unit, text)
 
         text.color = Color.argb(160, 255, 255, 255)
         text.textSize = 26 * unit
@@ -487,6 +603,8 @@ class GameView(context: Context) : View(context) {
         c.drawText("Match 3+ by COLOR or by NUMBER", width / 2f, y, text)
         text.color = Color.parseColor("#FFD23F")
         c.drawText("Same color + number = PERFECT: row & column clear, +2 moves", width / 2f, y + 36 * unit, text)
+        text.color = Color.argb(200, 255, 255, 255)
+        c.drawText("Match 4 = BOMB (3x3)   Match 5 = RAINBOW (swap: clear a color)", width / 2f, y + 72 * unit, text)
     }
 
     private fun drawTile(c: Canvas, t: Tile) {
@@ -506,6 +624,35 @@ class GameView(context: Context) : View(context) {
             c.drawPath(shape, fill)
             c.restore()
         }
+        if (t.special != 0) specialCount++
+        val pulse = (0.5f + 0.5f * sin(System.currentTimeMillis() / 220.0)).toFloat()
+        if (t.special == RAINBOW) {
+            c.save()
+            c.translate(cx, cy)
+            c.rotate(System.currentTimeMillis() % 4000L / 4000f * 360f)
+            fill.shader = rainbowShader
+            fill.alpha = a
+            c.drawCircle(0f, 0f, r * 1.05f, fill)
+            fill.shader = null
+            c.restore()
+            c.save()
+            c.translate(cx, cy)
+            c.scale(r * 0.62f, r * 0.62f)
+            fill.color = withAlpha(Color.WHITE, a)
+            c.drawPath(starPath, fill)
+            c.restore()
+            return
+        }
+        if (t.special == BOMB) {
+            line.color = withAlpha(Color.WHITE, ((0.45f + 0.55f * pulse) * a).toInt())
+            line.strokeWidth = r * 0.12f
+            for (k in 0 until 8) {
+                val ang = k * Math.PI / 4
+                val r0 = r * (1.12f + 0.06f * pulse)
+                val r1 = r * (1.32f + 0.14f * pulse)
+                c.drawLine(cx + (cos(ang) * r0).toFloat(), cy + (sin(ang) * r0).toFloat(), cx + (cos(ang) * r1).toFloat(), cy + (sin(ang) * r1).toFloat(), line)
+            }
+        }
         poly(1f, 0f, 0.12f, Color.argb(a * 3 / 10, 0, 0, 0))
         poly(1f, 0f, 0f, withAlpha(darken(base, 0.72f), a))
         poly(0.84f, -0.03f, -0.04f, withAlpha(base, a))
@@ -517,6 +664,10 @@ class GameView(context: Context) : View(context) {
         val yOff = r * 0.08f - (text.ascent() + text.descent()) / 2f
         c.drawText(t.num.toString(), cx, cy + yOff, text)
         text.clearShadowLayer()
+        if (t.special == BOMB) { // fuse spark
+            fill.color = withAlpha(Color.parseColor("#FFD23F"), a)
+            c.drawCircle(cx + r * 0.62f, cy - r * 0.78f, r * (0.14f + 0.06f * pulse), fill)
+        }
     }
 
     private fun drawParticles(c: Canvas) {
